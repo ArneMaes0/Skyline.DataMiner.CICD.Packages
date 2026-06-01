@@ -19,6 +19,7 @@ jobs:
         with:
           repository-owner: ${{ github.repository_owner }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          include-skyline: 'false'
 
       - name: Restore
         run: dotnet restore
