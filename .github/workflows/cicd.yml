@@ -28,23 +28,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Enable GitHub NuGet Registry
-        env:
-          REPO_OWNER: ${{ github.repository_owner }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $source = @{ Name = "PrivateGitHubNugets"; URL = "https://nuget.pkg.github.com/$env:REPO_OWNER/index.json"; Username = "USERNAME"; Password = "$env:GH_TOKEN" }
-
-          Write-Host "Checking source $($source.Name)..."
-
-          if (dotnet nuget list source | Select-String -Pattern $source.Name) {
-            Write-Host "Updating existing source $($source.Name)."
-            dotnet nuget update source $source.Name --source $source.URL --username $source.Username --password $source.Password --store-password-in-clear-text
-          } else {
-            Write-Host "Adding new source $($source.Name)."
-            dotnet nuget add source $source.URL --name $source.Name --username $source.Username --password $source.Password --store-password-in-clear-text
-          }
-        shell: pwsh
+      - name: Setup NuGet sources
+        uses: SkylineCommunications/_ReusableWorkflows/.github/actions/setup-nuget-sources@main
+        with:
+          repository-owner: ${{ github.repository_owner }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build
         env:
