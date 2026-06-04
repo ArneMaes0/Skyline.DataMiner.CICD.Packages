@@ -69,6 +69,23 @@
         /// <summary>
         /// Initializes a new instance of the <see cref="AutomationScriptBuilder"/> class.
         /// </summary>
+        /// <param name="dataMinerSolutionId">The ID of the script runner this script should run in.</param>
+        /// <param name="script">The Automation script.</param>
+        /// <param name="projects">The projects corresponding with the C# Exe blocks.</param>
+        /// <param name="dataMinerSolutionProjects">The projects matching with the dataMinerSolutionId, not only the ones corresponding with the C# Exe blocks of this automation script.</param>
+        /// <param name="allScripts">All the scripts in the Automation script solution.</param>
+        /// <param name="directoryForNuGetConfig">Directory where the solution is located</param>
+        /// <exception cref="ArgumentNullException"><paramref name="script"/> is <see langword="null"/>.</exception>
+        public AutomationScriptBuilder(string dataMinerSolutionId, Script script, IDictionary<string, Project> projects, ICollection<Project> dataMinerSolutionProjects, IEnumerable<Script> allScripts, string directoryForNuGetConfig)
+            : this(script, projects, allScripts, directoryForNuGetConfig)
+        {
+            DataMinerSolutionId = dataMinerSolutionId;
+            DataMinerSolutionProjects = dataMinerSolutionProjects ?? new List<Project>();
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="AutomationScriptBuilder"/> class.
+        /// </summary>
         /// <param name="script">The Automation script.</param>
         /// <param name="projects">The projects corresponding with the C# Exe blocks.</param>
         /// <param name="allScripts">All the scripts in the Automation script solution.</param>
@@ -97,11 +114,37 @@
             this.logCollector = logCollector ?? throw new ArgumentNullException(nameof(logCollector));
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="AutomationScriptBuilder"/> class.
+        /// </summary>
+        /// <param name="dataMinerSolutionId">The ID of the solution this script is part of.</param>
+        /// <param name="script">The Automation script.</param>
+        /// <param name="projects">The projects corresponding with the C# Exe blocks.</param>
+        /// <param name="dataMinerSolutionProjects">The projects of the whole solution, not only the ones corresponding with the C# Exe blocks of this automation script.</param>
+        /// <param name="allScripts">All the scripts in the Automation script solution.</param>
+        /// <param name="logCollector">The log collector</param>
+        /// <param name="directoryForNuGetConfig">Directory where the solution is located</param>
+        /// <exception cref="ArgumentNullException"><paramref name="script"/> is <see langword="null"/>.</exception>
+        /// <exception cref="ArgumentNullException"><paramref name="logCollector"/> is <see langword="null"/>.</exception>
+        public AutomationScriptBuilder(string dataMinerSolutionId, Script script, IDictionary<string, Project> projects, ICollection<Project> dataMinerSolutionProjects, IEnumerable<Script> allScripts, ILogCollector logCollector, string directoryForNuGetConfig)
+            : this(dataMinerSolutionId, script, projects, dataMinerSolutionProjects, allScripts, directoryForNuGetConfig)
+        {
+            this.logCollector = logCollector ?? throw new ArgumentNullException(nameof(logCollector));
+        }
+        
+        private string DataMinerSolutionId { get; } 
+
         private XmlDocument Document { get; }
 
         private Script Model { get; }
 
         private IDictionary<string, Project> Projects { get; }
+
+        /// <summary>
+        /// Gets the projects of the whole solution, not only the ones corresponding with the C# Exe blocks of this automation script.
+        /// </summary>
+        /// <remarks>This is for automation scripts that are part of a bigger solution for which the NuGet packages need to be unified across the solution.</remarks>
+        private ICollection<Project> DataMinerSolutionProjects { get; }
 
         private IEnumerable<Script> AllScripts { get; }
 
@@ -159,6 +202,8 @@
         {
             var xmlEdit = new EditXml.XmlDocument(Document);
 
+            UpdateSolutionIdElement(xmlEdit);
+
             return await BuildExeActionsAsync(xmlEdit).ConfigureAwait(false);
         }
 
@@ -203,16 +248,30 @@
         private async Task<NuGetPackageAssemblyData> ProcessPackageReferences(EditXml.XmlElement editExe, Project project, PackageReferenceProcessor packageReferenceProcessor,
             BuildResultItems buildResultItems, IList<PackageIdentity> packageIdentities)
         {
-            NuGetPackageAssemblyData nugetAssemblyData = null;
+            if (packageIdentities.Count == 0)
+            {
+                return null;
+            }
 
-            if (packageIdentities.Count > 0)
+            NuGetPackageAssemblyData nugetAssemblyData;
+
+            if (String.IsNullOrWhiteSpace(DataMinerSolutionId))
             {
                 nugetAssemblyData = await packageReferenceProcessor.ProcessAsync(packageIdentities, project.TargetFrameworkMoniker, DevPackHelper.AutomationDevPackNuGetDependenciesIncludingTransitive).ConfigureAwait(false);
-                LogDebug($"NuGetPackageAssemblyData: {nugetAssemblyData}");
-
-                ProcessFrameworkAssemblies(editExe, nugetAssemblyData);
-                ProcessLibAssemblies(editExe, buildResultItems, nugetAssemblyData);
             }
+            else
+            {
+                var solutionPackageIdentities = GetPackageIdentities(DataMinerSolutionProjects.Where(solProject => solProject.PackageReferences != null)
+                                                                                     .SelectMany(solProject => solProject.PackageReferences)
+                                                                                     .Distinct());
+
+                nugetAssemblyData = await packageReferenceProcessor.ProcessAsync(packageIdentities, solutionPackageIdentities, project.TargetFrameworkMoniker, DevPackHelper.AutomationDevPackNuGetDependenciesIncludingTransitive).ConfigureAwait(false);
+            }
+
+            LogDebug($"NuGetPackageAssemblyData: {nugetAssemblyData}");
+
+            ProcessFrameworkAssemblies(editExe, nugetAssemblyData);
+            ProcessLibAssemblies(editExe, buildResultItems, nugetAssemblyData);
 
             return nugetAssemblyData;
         }
@@ -609,7 +668,7 @@
                 }
 
                 // Find exe from another script
-                (string scriptName, ScriptExe scriptExe) = FindExeFromOtherScript(project, r);
+                (string scriptName, ScriptExe scriptExe) = FindExeFromOtherScript(project, r.Name);
 
                 if (scriptExe != null)
                 {
@@ -623,13 +682,11 @@
             }
         }
 
-        private (string scriptName, ScriptExe scriptExe) FindExeFromOtherScript(Project project, ProjectReference r)
+        private (string scriptName, ScriptExe scriptExe) FindExeFromOtherScript(Project project, string referencedProjectName)
         {
             // Check if the exe block belongs to another script.
             foreach (var script in AllScripts)
             {
-                var referencedProjectName = r.Name;
-
                 foreach (var exe in script.ScriptExes)
                 {
                     if (TryFindProjectPlaceholder(exe.Code, out string projectName, out _)
@@ -688,10 +745,12 @@
 
             foreach (var exe in Model.ScriptExes)
             {
-                if (String.Equals(exe.Type, "csharp", StringComparison.OrdinalIgnoreCase))
+                if (!String.Equals(exe.Type, "csharp", StringComparison.OrdinalIgnoreCase))
                 {
-                    await BuildExeActionAsync(xmlEdit, exe, packageReferenceProcessor, buildResultItems).ConfigureAwait(false);
+                    continue;
                 }
+
+                await BuildExeActionAsync(xmlEdit, exe, packageReferenceProcessor, buildResultItems).ConfigureAwait(false);
             }
 
             buildResultItems.Document = xmlEdit.GetXml();
@@ -725,6 +784,65 @@
         private void LogDebug(string message)
         {
             logCollector?.ReportDebug(Model?.Name + "|" + message);
+        }
+
+        /// <summary>
+        /// Updates or creates the SolutionId XML element next to the Name element.
+        /// If the dataMinerSolutionId is null or empty, removes any existing SolutionId element.
+        /// </summary>
+        /// <param name="xmlEdit">The XML document to modify.</param>
+        private void UpdateSolutionIdElement(EditXml.XmlDocument xmlEdit)
+        {
+            var scriptElement = xmlEdit.Root;
+            if (scriptElement == null)
+            {
+                return;
+            }
+
+            var solutionIdElement = scriptElement.Element["SolutionId"];
+
+            if (String.IsNullOrEmpty(DataMinerSolutionId))
+            {
+                // Remove existing element if dataMinerSolutionId is null or empty
+                if (solutionIdElement != null)
+                {
+                    scriptElement.Children.Remove(solutionIdElement);
+                }
+            }
+            else if (solutionIdElement != null)
+            {
+                // Update existing element
+                solutionIdElement.InnerText = DataMinerSolutionId;
+            }
+            else
+            {
+                // Create new element
+                var newSolutionIdElement = new EditXml.XmlElement("SolutionId", DataMinerSolutionId);
+
+                // Find the Name element to insert after it
+                var nameElement = scriptElement.Element["Name"];
+                if (nameElement != null)
+                {
+                    // Insert after Name element
+                    int nameIndex = scriptElement.Children.IndexOf(nameElement);
+                    if (nameIndex >= 0)
+                    {
+                        scriptElement.Children.Insert(nameIndex + 1, newSolutionIdElement);
+                    }
+                    else
+                    {
+                        scriptElement.Children.Add(newSolutionIdElement);
+                    }
+                }
+                else
+                {
+                    // If Name doesn't exist, just add it at the beginning (should not occur).
+                    scriptElement.Children.Insert(0, newSolutionIdElement);
+                }
+
+                // Format to ensure proper indentation and newlines
+                scriptElement.Format();
+            }
         }
     }
 }
